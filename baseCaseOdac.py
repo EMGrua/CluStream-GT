@@ -6,9 +6,13 @@ import matplotlib.pyplot as plt
 from sklearn import metrics
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
+#from sklearn.datasets import load_digits
+from sklearn.preprocessing import scale
 from scipy import stats
 from generate_data import *
-from CluStreamGT import *
+from clustering import *
+from odac import Odac
+import pandas as pd
 
 #generateData(days, sample, group, noise_width, write = False):
 test1 = {}
@@ -29,6 +33,7 @@ for i in range(40):
 #0 to 19 cluster 1, 20 to 39 cluster 2, 40 to 59 and 70 cluster 3
 q = 20 #number of micro-clusters
 starter_dataset = {}
+#stream_data = {}
 for e in test1.keys():
     starter_dataset[e] = test1[e]
 for e in test2.keys():
@@ -72,20 +77,41 @@ for i in range(0, len(starter_dataset)):
 
 
 
+#SSQ = []
+
+#kmeans_true_label = []
 
 
 #How many time to add data
 repetition = 30
 #
 total_mclu_time = 0
+total_clu_time = 0
 total_kmeans_time = 0
 mean_silhouette_mclu = []
+mean_silhouette_clu = []
 mean_silhouette_kmeans = []
 
 #Performing K-means using the microcluster information
 k = 3
 #keeping track of the timestep
 t = len(starter_dataset)
+
+#creating the ids for odac
+#ids_odac = ['time_series_' + str(i) for i in range(0,t)]
+ids_odac = [i for i in range(0,t)]
+#the total execution time of odac
+odac_total_time = 0
+#the mean silhouette score of odac
+mean_silhouette_odac = []
+#creating an odac instance
+odac = Odac(ids_odac)
+#setting up the index for the pd framework
+timepoints = range(0, 24)
+#setting the pd framework for odac
+df = pd.DataFrame(index=timepoints, columns=ids_odac)
+
+
 #from which function each datapoint should sample data
 true_labels = []
 for i in range(0, len(starter_dataset)):
@@ -98,25 +124,30 @@ for i in range(0, len(starter_dataset)):
         true_labels.append((e,3))
 
 for r in range(0, repetition):
-
+    #######Loop for each time step#######
+    #generateData(days, sample, group, noise_width, write = False):
+    #array of tuples of id and true cluster
 
     #Adding an extra point to the original sample
     #implementation practicality, this new point must have as much data as others
     #otherwise k-means breaks
     add_point = np.random.choice([True, False])
     if add_point:
-        n_new_points = np.random.choice(range(1,5))
-        for i in range(0, n_new_points):
-            g = np.random.choice([1, 2, 3])
-            true_labels.append((len(true_labels), g))
-            kmeans_data.append(generateData(days,sample,g,0.1))
+        pass
+
     input_data = []
 
     for i in range(0, len(true_labels)):
         current_point = true_labels[i]
         id = current_point[0]
         g = current_point[1]
-        input_data.append((id, generateData(days,sample,g,0.1)))
+        gdata = generateData(days,sample,g,0.1)
+        input_data.append((id, gdata))
+        #the current odac id
+        id = ids_odac[i]
+        #giving data to the current odac id
+        df.loc[:, id] = gdata
+
         #performing MedCluStream
         #best params found with 1days 1sample: q=q/2, delta=1,t=2,r=40
         clustering_time_start = time()
@@ -149,6 +180,8 @@ for r in range(0, repetition):
 
         #doing clustering with only the means
         centroids = []
+        #choose centroids with probabilities
+        #centroid_indexes = np.random.choice(len(mcluster_means),size=k,p=prob_array, replace=False)
         #choose the 3 highest as centroids
         centroid_indexes = prob_array.argsort()[-3:][::-1]
         for e in centroid_indexes:
@@ -171,7 +204,31 @@ for r in range(0, repetition):
             #mistake here!!!!! it does not loop when we go back to the ids, it should modulo on the ids
             for e in mcluster_match[h]:
                 mclu_indlabels[e] = h
+    #        print('clusters using only means: ',mcluster_match)
+    #        print('clusters using only means, points: ', mclu_indlabels)
 
+
+
+        #print(micro_clusters)
+        centroids = micro_clusters[np.random.choice(len(micro_clusters),size=k, p = prob_array, replace=False)]
+        clutime_start = time()
+        cluKMeans = KMeans(n_clusters=k, init = centroids, n_init = 1)
+        cluKMeans.fit(micro_clusters)
+        clutime_end = time()
+        clutime = clutime_end - clutime_start + clustering_time
+        clu_labels = cluKMeans.predict(micro_clusters)
+        cluster_match = [[],[],[]]
+        for j in range(0,len(clu_labels)):
+            for e in ids:
+                if ids[e][0] == j:
+                    cluster_match[clu_labels[j]].append(e)
+
+        clu_indlabels = [0]*len(kmeans_data)
+        for h in range(0,len(cluster_match)):
+            for e in cluster_match[h]:
+                clu_indlabels[e] = h
+        #
+        #print('clusters using microclusters: ',cluster_match)
 
         #making the means of the kmeans_data
         start_data_prep = time()
@@ -188,34 +245,65 @@ for r in range(0, repetition):
         ktime_end = time()
         ktime = ktime_end - ktime_start + data_prep
         klabels = k_means.predict(kmeans_means)
+    #    print('clusters using kmeans, points: ', klabels)
+    #    print('clusters using kmeans, len: ', len(klabels))
         total_mclu_time += mclutime
+        total_clu_time += clutime
         total_kmeans_time += ktime
 
 
 
         silhouette_mclu = silhouette_score(kmeans_means, mclu_indlabels)
-
+        silhouette_clu = silhouette_score(kmeans_means, clu_indlabels)
         silhouette_kmeans = silhouette_score(kmeans_means, klabels)
         mean_silhouette_mclu.append(silhouette_mclu)
-
+        mean_silhouette_clu.append(silhouette_clu)
         mean_silhouette_kmeans.append(silhouette_kmeans)
+        #start time of this odac run
+    odac_time_start = time()
+    #adding data to odac for this run
+    clusters = odac.add_data(df.loc[0,:])
+#    print(clusters)
+    #end time of the odac execution
+    odac_time_end = time()
+    #the actual run time of odac execution
+    odac_time = odac_time_end - odac_time_start
+    #adding the run time to the total run time
+    odac_total_time += odac_time
+    ###Old procedure###
+
+    odac_indlabels = [0]*len(kmeans_data)
+    for h in range(0, len(clusters)):
+        for e in clusters[h]:
+            odac_indlabels[e] = h
+
+    if len(clusters) > 1:
+        silhouette_odac = silhouette_score(kmeans_means, odac_indlabels)
+        mean_silhouette_odac.append(silhouette_odac)
 
 
+#    print('silhouette for mclu: ', silhouette_mclu)
+#    print('silhouette for clu: ', silhouette_clu)
+#    print('silhouette for kmeans: ', silhouette_kmeans)
 
+'''
 print('average silhouette for mclu: ', np.mean(mean_silhouette_mclu))
-
+print('average silhouette for clu: ', np.mean(mean_silhouette_clu))
 print('average silhouette for kmeans: ', np.mean(mean_silhouette_kmeans))
 print('mclutime:', total_mclu_time)
-
+print('clutime:', total_clu_time)
 print('ktime:', total_kmeans_time)
+'''
 
 #Writing results to csv
-f = open('BaseCase30.txt', 'a')
+f = open('BaseCaseOdac.txt', 'a')
 f.write('repetition: '+ str(repetition))
 f.write(' average silhouette for mclu: '+ str(np.mean(mean_silhouette_mclu)))
-
+f.write(' average silhouette for clu: '+ str(np.mean(mean_silhouette_clu)))
 f.write(' average silhouette for kmeans: '+ str(np.mean(mean_silhouette_kmeans)))
+f.write(' average silhouette for odac: '+ str(np.mean(mean_silhouette_odac)))
 f.write(' mclutime:'+ str(total_mclu_time))
-
+f.write(' clutime:'+ str(total_clu_time))
 f.write(' ktime:'+ str(total_kmeans_time))
+f.write(' odactime:'+ str(odac_total_time))
 f.write('\n')
